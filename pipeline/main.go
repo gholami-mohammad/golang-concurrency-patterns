@@ -2,100 +2,117 @@ package main
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 )
-
-// read users.csv file
-// convert rows to user struct
-// get age of all users
-// get count of users older than 30 years
 
 type User struct {
 	FirstName string
 	LastName  string
+	Sex       string
 	Email     string
-	Gender    string
-	BirthDate time.Time
+	Birthday  time.Time
+}
+
+// real csv file line by line
+func readFile(csvRow chan []string) {
+	file, err := os.Open("./users.csv")
+	if err != nil {
+		log.Fatalln("failed to read file", err)
+	}
+	reader := csv.NewReader(file)
+	for {
+		line, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return
+			} else {
+				log.Fatalln("filed to read csv row", err)
+			}
+		}
+
+		csvRow <- line
+	}
+}
+
+func rowToUserStream(rowChan <-chan []string, userChan chan User) {
+	cnt := 0
+	for row := range rowChan {
+		cnt++
+		user := User{
+			FirstName: row[0],
+			LastName:  row[1],
+			Email:     row[2],
+			Sex:       row[3],
+			Birthday: func() time.Time {
+				b := row[4]
+				bd, err := time.Parse("2006/01/02", b)
+				if err != nil {
+					log.Fatalf("Invalid birthday %v", b)
+				}
+
+				return bd
+			}(),
+		}
+		fmt.Println("ROW TO USER", cnt)
+		userChan <- user
+	}
+}
+
+const year = 365 * 24 * 60 * 60
+
+func ageCalculator(userChan <-chan User, ageChan chan int) {
+	cnt := 0
+	for user := range userChan {
+		cnt++
+		age := time.Since(user.Birthday)
+		a := age.Seconds() / year
+		ageChan <- int(a)
+		fmt.Println("AGE CALCULATED", int(a), cnt)
+	}
 }
 
 func main() {
-	file, err := os.OpenFile("users.csv", os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	defer file.Close()
+	rowChan := make(chan []string)
+	userChan := make(chan User)
+	ageChan := make(chan int)
 
-	finished := false
-
-	// pipeline1: read rows
-	rows := make(chan []string)
 	go func() {
-		reader := csv.NewReader(file)
-		for {
-			row, err := reader.Read()
-			if err != nil {
-				fmt.Println("\nclosing rows")
-				close(rows)
-				break
-			}
-			rows <- row
-			// add some delay to read and slow data printing on screen
-			time.Sleep(time.Millisecond * 1)
-		}
+		readFile(rowChan)
+		close(rowChan)
+		fmt.Println("ROW CHAN CLOSED")
 	}()
 
-	// pipeline2: convert each row to user struct
-	users := make(chan User)
 	go func() {
-		for row := range rows {
-			user := User{}
-			user.FirstName = row[0]
-			user.LastName = row[1]
-			user.Email = row[2]
-			user.Gender = row[3]
-			user.BirthDate, _ = time.Parse("2006/01/02", row[4])
-
-			users <- user
-		}
-		fmt.Println("closing users")
-		close(users)
+		rowToUserStream(rowChan, userChan)
+		close(userChan)
+		fmt.Println("USER CHAN CLOSED")
 	}()
 
-	// pipeline3:  get age of all users
-	ages := make(chan int)
 	go func() {
-		for user := range users {
-			age := int(time.Now().Sub(user.BirthDate).Hours() / 24 / 365)
-			ages <- age
-		}
-		fmt.Println("closing ages")
-		close(ages)
+		ageCalculator(userChan, ageChan)
+		close(ageChan)
+		fmt.Println("AGE CHAN CLOSED")
 	}()
 
-	// pipeline4: older than 30 years old detector
-	counter := make(chan int)
-	go olderThan30Counter(counter)
+	ageCloser := sync.WaitGroup{}
+	ageCloser.Add(1)
 	go func() {
-		for age := range ages {
-			if age >= 30 {
-				fmt.Printf("\rUser older than 30 detected, we have %d user now.", <-counter)
-			}
+		defer ageCloser.Done()
+		cnt := 0
+		for a := range ageChan {
+			cnt++
+			fmt.Println(a, cnt)
 		}
-
-		fmt.Println("")
-		finished = true
+		fmt.Println("END PRINT")
 	}()
 
-	for !finished {
-	}
-
-}
-
-func olderThan30Counter(counter chan int) {
-	for i := 1; ; i++ {
-		counter <- i
-	}
+	fmt.Println("WAITING...")
+	ageCloser.Wait()
+	fmt.Println("LAST WAIT DONE")
 }
